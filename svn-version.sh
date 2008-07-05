@@ -1,2 +1,2 @@
 #!/bin/sh
-echo "#define DRIVER_VERSION	\"SVN r207-flip\""
+echo "#define DRIVER_VERSION	\"SVN r223-flip\""

@@ -28,7 +28,7 @@
 #include <linux/list.h>
 #include <linux/module.h>
 #include <linux/usb.h>
-#include <linux/videodev.h>
+#include <linux/videodev2.h>
 #include <linux/vmalloc.h>
 #include <linux/wait.h>
 #include <asm/atomic.h>
@@ -301,7 +301,8 @@ static int uvc_parse_format(struct uvc_device *dev,
 	switch (buffer[2]) {
 	case VS_FORMAT_UNCOMPRESSED:
 	case VS_FORMAT_FRAME_BASED:
-		if (buflen < 27) {
+		n = buffer[2] == VS_FORMAT_UNCOMPRESSED ? 27 : 28;
+		if (buflen < n) {
 			uvc_trace(UVC_TRACE_DESCR, "device %d videostreaming"
 			       "interface %d FORMAT error\n",
 			       dev->udev->devnum,
@@ -452,6 +453,18 @@ static int uvc_parse_format(struct uvc_device *dev,
 		}
 		frame->dwFrameInterval = *intervals;
 
+		/* Several UVC chipsets screw up dwMaxVideoFrameBufferSize
+		 * completely. Observed behaviours range from setting the
+		 * value to 1.1x the actual frame size of hardwiring the
+		 * 16 low bits to 0. This results in a higher than necessary
+		 * memory usage as well as a wrong image size information. For
+		 * uncompressed formats this can be fixed by computing the
+		 * value from the frame size.
+		 */
+		if (!(format->flags & UVC_FMT_FLAG_COMPRESSED))
+			frame->dwMaxVideoFrameBufferSize = format->bpp
+				* frame->wWidth * frame->wHeight / 8;
+
 		/* Some bogus devices report dwMinFrameInterval equal to
 		 * dwMaxFrameInterval and have dwFrameIntervalStep set to
 		 * zero. Setting all null intervals to 1 fixes the problem and
@@ -505,11 +518,11 @@ static int uvc_parse_format(struct uvc_device *dev,
 }
 
 static int uvc_parse_streaming(struct uvc_device *dev,
-	struct uvc_streaming *streaming)
+	struct usb_interface *intf)
 {
+	struct uvc_streaming *streaming = NULL;
 	struct uvc_format *format;
 	struct uvc_frame *frame;
-	struct usb_interface *intf = streaming->intf;
 	struct usb_host_interface *alts = &intf->altsetting[0];
 	unsigned char *_buffer, *buffer = alts->extra;
 	int _buflen, buflen = alts->extralen;
@@ -517,7 +530,32 @@ static int uvc_parse_streaming(struct uvc_device *dev,
 	unsigned int size, i, n, p;
 	__u32 *interval;
 	__u16 psize;
-	int ret;
+	int ret = -EINVAL;
+
+	if (intf->cur_altsetting->desc.bInterfaceSubClass
+		!= SC_VIDEOSTREAMING) {
+		uvc_trace(UVC_TRACE_DESCR, "device %d interface %d isn't a "
+			"video streaming interface\n", dev->udev->devnum,
+			intf->altsetting[0].desc.bInterfaceNumber);
+		return -EINVAL;
+	}
+
+	if (usb_driver_claim_interface(&uvc_driver.driver, intf, dev)) {
+		uvc_trace(UVC_TRACE_DESCR, "device %d interface %d is already "
+			"claimed\n", dev->udev->devnum,
+			intf->altsetting[0].desc.bInterfaceNumber);
+		return -EINVAL;
+	}
+
+	streaming = kzalloc(sizeof *streaming, GFP_KERNEL);
+	if (streaming == NULL) {
+		usb_driver_release_interface(&uvc_driver.driver, intf);
+		return -EINVAL;
+	}
+
+	mutex_init(&streaming->mutex);
+	streaming->intf = usb_get_intf(intf);
+	streaming->intfnum = intf->cur_altsetting->desc.bInterfaceNumber;
 
 	/* The Pico iMage webcam has its class-specific interface descriptors
 	 * after the endpoint descriptors.
@@ -549,7 +587,7 @@ static int uvc_parse_streaming(struct uvc_device *dev,
 	if (buflen <= 2) {
 		uvc_trace(UVC_TRACE_DESCR, "no class-specific streaming "
 			"interface descriptors found.\n");
-		return -EINVAL;
+		goto error;
 	}
 
 	/* Parse the header descriptor. */
@@ -557,7 +595,7 @@ static int uvc_parse_streaming(struct uvc_device *dev,
 		uvc_trace(UVC_TRACE_DESCR, "device %d videostreaming interface "
 			"%d OUTPUT HEADER descriptor is not supported.\n",
 			dev->udev->devnum, alts->desc.bInterfaceNumber);
-		return -EINVAL;
+		goto error;
 	} else if (buffer[2] == VS_INPUT_HEADER) {
 		p = buflen >= 5 ? buffer[3] : 0;
 		n = buflen >= 12 ? buffer[12] : 0;
@@ -567,7 +605,7 @@ static int uvc_parse_streaming(struct uvc_device *dev,
 				"interface %d INPUT HEADER descriptor is "
 				"invalid.\n", dev->udev->devnum,
 				alts->desc.bInterfaceNumber);
-			return -EINVAL;
+			goto error;
 		}
 
 		streaming->header.bNumFormats = p;
@@ -580,15 +618,17 @@ static int uvc_parse_streaming(struct uvc_device *dev,
 		streaming->header.bControlSize = n;
 
 		streaming->header.bmaControls = kmalloc(p*n, GFP_KERNEL);
-		if (streaming->header.bmaControls == NULL)
-			return -ENOMEM;
+		if (streaming->header.bmaControls == NULL) {
+			ret = -ENOMEM;
+			goto error;
+		}
 
 		memcpy(streaming->header.bmaControls, &buffer[13], p*n);
 	} else {
 		uvc_trace(UVC_TRACE_DESCR, "device %d videostreaming interface "
 			"%d HEADER descriptor not found.\n", dev->udev->devnum,
 			alts->desc.bInterfaceNumber);
-		return -EINVAL;
+		goto error;
 	}
 
 	buflen -= buffer[0];
@@ -645,14 +685,16 @@ static int uvc_parse_streaming(struct uvc_device *dev,
 		uvc_trace(UVC_TRACE_DESCR, "device %d videostreaming interface "
 			"%d has no supported formats defined.\n",
 			dev->udev->devnum, alts->desc.bInterfaceNumber);
-		return -EINVAL;
+		goto error;
 	}
 
 	size = nformats * sizeof *format + nframes * sizeof *frame
 	     + nintervals * sizeof *interval;
 	format = kzalloc(size, GFP_KERNEL);
-	if (format == NULL)
-		return -ENOMEM;
+	if (format == NULL) {
+		ret = -ENOMEM;
+		goto error;
+	}
 
 	frame = (struct uvc_frame *)&format[nformats];
 	interval = (__u32 *)&frame[nframes];
@@ -671,7 +713,7 @@ static int uvc_parse_streaming(struct uvc_device *dev,
 			ret = uvc_parse_format(dev, streaming, format,
 				&interval, buffer, buflen);
 			if (ret < 0)
-				return ret;
+				goto error;
 
 			frame += format->nframes;
 			format++;
@@ -703,7 +745,16 @@ static int uvc_parse_streaming(struct uvc_device *dev,
 			streaming->maxpsize = psize;
 	}
 
+	list_add_tail(&streaming->list, &dev->streaming);
 	return 0;
+
+error:
+	usb_driver_release_interface(&uvc_driver.driver, intf);
+	usb_put_intf(intf);
+	kfree(streaming->format);
+	kfree(streaming->header.bmaControls);
+	kfree(streaming);
+	return ret;
 }
 
 /* Parse vendor-specific extensions. */
@@ -793,7 +844,6 @@ static int uvc_parse_standard_control(struct uvc_device *dev,
 	const unsigned char *buffer, int buflen)
 {
 	struct usb_device *udev = dev->udev;
-	struct uvc_streaming *streaming;
 	struct uvc_entity *unit, *term;
 	struct usb_interface *intf;
 	struct usb_host_interface *alts = dev->intf->cur_altsetting;
@@ -824,42 +874,7 @@ static int uvc_parse_standard_control(struct uvc_device *dev,
 				continue;
 			}
 
-			if (intf->cur_altsetting->desc.bInterfaceSubClass
-				!= SC_VIDEOSTREAMING) {
-				uvc_trace(UVC_TRACE_DESCR, "device %d "
-					"interface %d isn't a video "
-					"streaming interface\n",
-					udev->devnum, i);
-				continue;
-			}
-
-			if (usb_interface_claimed(intf)) {
-				uvc_trace(UVC_TRACE_DESCR, "device %d "
-					"interface %d is already claimed\n",
-					udev->devnum, i);
-				continue;
-			}
-
-			usb_driver_claim_interface(&uvc_driver.driver, intf,
-				dev);
-
-			streaming = kzalloc(sizeof *streaming, GFP_KERNEL);
-			if (streaming == NULL)
-				continue;
-			mutex_init(&streaming->mutex);
-			streaming->intf = usb_get_intf(intf);
-			streaming->intfnum =
-				intf->cur_altsetting->desc.bInterfaceNumber;
-
-			if (uvc_parse_streaming(dev, streaming) < 0) {
-				usb_put_intf(intf);
-				kfree(streaming->format);
-				kfree(streaming->header.bmaControls);
-				kfree(streaming);
-				continue;
-			}
-
-			list_add_tail(&streaming->list, &dev->streaming);
+			uvc_parse_streaming(dev, intf);
 		}
 		break;
 
@@ -1511,6 +1526,8 @@ void uvc_delete(struct kref *kref)
 	list_for_each_safe(p, n, &dev->streaming) {
 		struct uvc_streaming *streaming;
 		streaming = list_entry(p, struct uvc_streaming, list);
+		usb_driver_release_interface(&uvc_driver.driver,
+			streaming->intf);
 		usb_put_intf(streaming->intf);
 		kfree(streaming->format);
 		kfree(streaming->header.bmaControls);
@@ -1618,11 +1635,7 @@ static void uvc_disconnect(struct usb_interface *intf)
 	 * lock is needed to prevent uvc_disconnect from releasing its
 	 * reference to the uvc_device instance after uvc_v4l2_open() received
 	 * the pointer to the device (video_devdata) but before it got the
-	 * chance to increase the reference count (kref_get). An alternative
-	 * (used by the usb-skeleton driver) would have been to use the big
-	 * kernel lock instead of a driver-specific mutex (open calls on
-	 * char devices are protected by the BKL), but that approach is not
-	 * recommended for new code.
+	 * chance to increase the reference count (kref_get).
 	 */
 	mutex_lock(&uvc_driver.open_mutex);
 
@@ -1816,6 +1829,15 @@ static struct usb_device_id uvc_ids[] = {
 	  .bInterfaceSubClass	= 1,
 	  .bInterfaceProtocol	= 0,
 	  .driver_info		= UVC_QUIRK_STREAM_NO_FID },
+	/* Syntek (Asus U3S) */
+	{ .match_flags		= USB_DEVICE_ID_MATCH_DEVICE
+				| USB_DEVICE_ID_MATCH_INT_INFO,
+	  .idVendor		= 0x174f,
+	  .idProduct		= 0x8a33,
+	  .bInterfaceClass	= USB_CLASS_VIDEO,
+	  .bInterfaceSubClass	= 1,
+	  .bInterfaceProtocol	= 0,
+	  .driver_info		= UVC_QUIRK_STREAM_NO_FID },
 	/* Ecamm Pico iMage */
 	{ .match_flags		= USB_DEVICE_ID_MATCH_DEVICE
 				| USB_DEVICE_ID_MATCH_INT_INFO,
@@ -1827,13 +1849,25 @@ static struct usb_device_id uvc_ids[] = {
 	  .driver_info		= UVC_QUIRK_PROBE_EXTRAFIELDS },
 	/* Bodelin ProScopeHR */
 	{ .match_flags		= USB_DEVICE_ID_MATCH_DEVICE
+				| USB_DEVICE_ID_MATCH_DEV_HI
 				| USB_DEVICE_ID_MATCH_INT_INFO,
 	  .idVendor		= 0x19ab,
 	  .idProduct		= 0x1000,
+	  .bcdDevice_hi		= 0x0126,
 	  .bInterfaceClass	= USB_CLASS_VIDEO,
 	  .bInterfaceSubClass	= 1,
 	  .bInterfaceProtocol	= 0,
 	  .driver_info		= UVC_QUIRK_STATUS_INTERVAL },
+	/* SiGma Micro USB Web Camera */
+	{ .match_flags		= USB_DEVICE_ID_MATCH_DEVICE
+				| USB_DEVICE_ID_MATCH_INT_INFO,
+	  .idVendor		= 0x1c4f,
+	  .idProduct		= 0x3000,
+	  .bInterfaceClass	= USB_CLASS_VIDEO,
+	  .bInterfaceSubClass	= 1,
+	  .bInterfaceProtocol	= 0,
+	  .driver_info		= UVC_QUIRK_PROBE_MINMAX
+				| UVC_QUIRK_IGNORE_SELECTOR_UNIT},
 	/* Acer OEM Webcam - Unknown vendor */
 	{ .match_flags		= USB_DEVICE_ID_MATCH_DEVICE
 				| USB_DEVICE_ID_MATCH_INT_INFO,

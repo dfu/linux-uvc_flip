@@ -181,8 +181,10 @@ enum  v4l2_exposure_auto_type {
 /*
  * kzalloc()
  */
+typedef unsigned int __nocast gfp_flags;
+
 static inline void *
-kzalloc(size_t size, unsigned int __nocast gfp_flags)
+kzalloc(size_t size, gfp_t gfp_flags)
 {
 	void *mem = kmalloc(size, gfp_flags);
 	if (mem)

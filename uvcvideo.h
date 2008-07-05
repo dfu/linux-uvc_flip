@@ -2,23 +2,23 @@
 #define _USB_VIDEO_H_
 
 #include <linux/kernel.h>
-#include <linux/videodev.h>
+#include <linux/videodev2.h>
 
 #include "uvc_compat.h"
 
 /*
  * Dynamic controls
  */
-/* Data types for UVC control data */
-enum uvc_control_data_type {
-	UVC_CTRL_DATA_TYPE_RAW = 0,
-	UVC_CTRL_DATA_TYPE_SIGNED,
-	UVC_CTRL_DATA_TYPE_UNSIGNED,
-	UVC_CTRL_DATA_TYPE_BOOLEAN,
-	UVC_CTRL_DATA_TYPE_ENUM,
-	UVC_CTRL_DATA_TYPE_BITMASK,
-};
 
+/* Data types for UVC control data */
+#define UVC_CTRL_DATA_TYPE_RAW		0
+#define UVC_CTRL_DATA_TYPE_SIGNED	1
+#define UVC_CTRL_DATA_TYPE_UNSIGNED	2
+#define UVC_CTRL_DATA_TYPE_BOOLEAN	3
+#define UVC_CTRL_DATA_TYPE_ENUM		4
+#define UVC_CTRL_DATA_TYPE_BITMASK	5
+
+/* Control flags */
 #define UVC_CONTROL_SET_CUR	(1 << 0)
 #define UVC_CONTROL_GET_CUR	(1 << 1)
 #define UVC_CONTROL_GET_MIN	(1 << 2)
@@ -51,7 +51,7 @@ struct uvc_xu_control_mapping {
 	__u8 size;
 	__u8 offset;
 	enum v4l2_ctrl_type v4l2_type;
-	enum uvc_control_data_type data_type;
+	__u32 data_type;
 };
 
 struct uvc_xu_control {
@@ -314,6 +314,7 @@ struct uvc_xu_control {
 #define UVC_QUIRK_PROBE_EXTRAFIELDS	0x00000004
 #define UVC_QUIRK_BUILTIN_ISIGHT	0x00000008
 #define UVC_QUIRK_STREAM_NO_FID		0x00000010
+#define UVC_QUIRK_IGNORE_SELECTOR_UNIT	0x00000020
 
 /* Format flags */
 #define UVC_FMT_FLAG_COMPRESSED		0x00000001
@@ -377,7 +378,7 @@ struct uvc_control_mapping {
 	__u8 size;
 	__u8 offset;
 	enum v4l2_ctrl_type v4l2_type;
-	enum uvc_control_data_type data_type;
+	__u32 data_type;
 
 	struct uvc_menu_info *menu_info;
 	__u32 menu_count;
@@ -551,11 +552,13 @@ struct uvc_buffer {
 	enum uvc_buffer_state state;
 };
 
+#define UVC_QUEUE_STREAMING		(1 << 0)
+#define UVC_QUEUE_DISCONNECTED		(1 << 1)
+#define UVC_QUEUE_DROP_INCOMPLETE	(1 << 2)
+
 struct uvc_video_queue {
 	void *mem;
-	unsigned int streaming : 1,
-		     frozen : 1,
-		     drop_incomplete : 1;
+	unsigned int flags;
 	__u32 sequence;
 
 	unsigned int count;
@@ -572,6 +575,7 @@ struct uvc_video_device {
 	struct uvc_device *dev;
 	struct video_device *vdev;
 	atomic_t active;
+	unsigned int frozen : 1;
 
 	struct list_head iterms;
 	struct uvc_entity *oterm;
@@ -599,6 +603,8 @@ struct uvc_video_device {
 
 	struct urb *urb[UVC_URBS];
 	char *urb_buffer[UVC_URBS];
+	dma_addr_t urb_dma[UVC_URBS];
+	unsigned int urb_size;
 
 	__u8 last_fid;
 };
@@ -714,11 +720,15 @@ extern int uvc_dequeue_buffer(struct uvc_video_queue *queue,
 		struct v4l2_buffer *v4l2_buf, int nonblocking,
 		struct uvc_frame *frame);
 extern int uvc_queue_enable(struct uvc_video_queue *queue, int enable);
-extern void uvc_queue_cancel(struct uvc_video_queue *queue);
+extern void uvc_queue_cancel(struct uvc_video_queue *queue, int disconnect);
 extern struct uvc_buffer *uvc_queue_next_buffer(struct uvc_video_queue *queue,
 		struct uvc_buffer *buf);
 extern unsigned int uvc_queue_poll(struct uvc_video_queue *queue,
 		struct file *file, poll_table *wait);
+static inline int uvc_queue_streaming(struct uvc_video_queue *queue)
+{
+	return queue->flags & UVC_QUEUE_STREAMING;
+}
 
 /* V4L2 interface */
 extern struct file_operations uvc_fops;

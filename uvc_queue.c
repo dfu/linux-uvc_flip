@@ -16,7 +16,7 @@
 #include <linux/list.h>
 #include <linux/module.h>
 #include <linux/usb.h>
-#include <linux/videodev.h>
+#include <linux/videodev2.h>
 #include <linux/vmalloc.h>
 #include <linux/wait.h>
 #include <asm/atomic.h>
@@ -257,10 +257,15 @@ int uvc_queue_buffer(struct uvc_video_queue *queue,
 		goto done;
 	}
 
+	spin_lock_irqsave(&queue->irqlock, flags);
+	if (queue->flags & UVC_QUEUE_DISCONNECTED) {
+		spin_unlock_irqrestore(&queue->irqlock, flags);
+		ret = -ENODEV;
+		goto done;
+	}
 	buf->state = UVC_BUF_STATE_QUEUED;
 	buf->buf.bytesused = 0;
 	list_add_tail(&buf->stream, &queue->mainqueue);
-	spin_lock_irqsave(&queue->irqlock, flags);
 	list_add_tail(&buf->queue, &queue->irqqueue);
 	spin_unlock_irqrestore(&queue->irqlock, flags);
 
@@ -411,20 +416,20 @@ int uvc_queue_enable(struct uvc_video_queue *queue, int enable)
 
 	mutex_lock(&queue->mutex);
 	if (enable) {
-		if (queue->streaming) {
+		if (uvc_queue_streaming(queue)) {
 			ret = -EBUSY;
 			goto done;
 		}
 		queue->sequence = 0;
-		queue->streaming = 1;
+		queue->flags |= UVC_QUEUE_STREAMING;
 	} else {
-		uvc_queue_cancel(queue);
+		uvc_queue_cancel(queue, 0);
 		INIT_LIST_HEAD(&queue->mainqueue);
 
 		for (i = 0; i < queue->count; ++i)
 			queue->buffer[i].state = UVC_BUF_STATE_IDLE;
 
-		queue->streaming = 0;
+		queue->flags &= ~UVC_QUEUE_STREAMING;
 	}
 
 done:
@@ -438,10 +443,13 @@ done:
  * Cancelling the queue marks all buffers on the irq queue as erroneous,
  * wakes them up and remove them from the queue.
  *
+ * If the disconnect parameter is set, further calls to uvc_queue_buffer will
+ * fail with -ENODEV.
+ *
  * This function acquires the irq spinlock and can be called from interrupt
  * context.
  */
-void uvc_queue_cancel(struct uvc_video_queue *queue)
+void uvc_queue_cancel(struct uvc_video_queue *queue, int disconnect)
 {
 	struct uvc_buffer *buf;
 	unsigned long flags;
@@ -454,6 +462,14 @@ void uvc_queue_cancel(struct uvc_video_queue *queue)
 		buf->state = UVC_BUF_STATE_ERROR;
 		wake_up(&buf->wait);
 	}
+	/* This must be protected by the irqlock spinlock to avoid race
+	 * conditions between uvc_queue_buffer and the disconnection event that
+	 * could result in an interruptible wait in uvc_dequeue_buffer. Do not
+	 * blindly replace this logic by checking for the UVC_DEV_DISCONNECTED
+	 * state outside the queue code.
+	 */
+	if (disconnect)
+		queue->flags |= UVC_QUEUE_DISCONNECTED;
 	spin_unlock_irqrestore(&queue->irqlock, flags);
 }
 
@@ -463,7 +479,8 @@ struct uvc_buffer *uvc_queue_next_buffer(struct uvc_video_queue *queue,
 	struct uvc_buffer *nextbuf;
 	unsigned long flags;
 
-	if (queue->drop_incomplete && buf->buf.length != buf->buf.bytesused) {
+	if ((queue->flags & UVC_QUEUE_DROP_INCOMPLETE) &&
+	    buf->buf.length != buf->buf.bytesused) {
 		buf->state = UVC_BUF_STATE_QUEUED;
 		buf->buf.bytesused = 0;
 		return buf;

@@ -16,7 +16,7 @@
 #include <linux/list.h>
 #include <linux/module.h>
 #include <linux/usb.h>
-#include <linux/videodev.h>
+#include <linux/videodev2.h>
 #include <linux/vmalloc.h>
 #include <linux/mm.h>
 #include <linux/wait.h>
@@ -246,7 +246,7 @@ static int uvc_v4l2_set_format(struct uvc_video_device *video,
 	if (fmt->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
 		return -EINVAL;
 
-	if (video->queue.streaming)
+	if (uvc_queue_streaming(&video->queue))
 		return -EBUSY;
 
 	ret = uvc_v4l2_try_format(video, fmt, &probe, &format, &frame);
@@ -298,7 +298,7 @@ static int uvc_v4l2_set_streamparm(struct uvc_video_device *video,
 	if (parm->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
 		return -EINVAL;
 
-	if (video->queue.streaming)
+	if (uvc_queue_streaming(&video->queue))
 		return -EBUSY;
 
 	memcpy(&probe, &video->streaming->ctrl, sizeof probe);
@@ -493,8 +493,8 @@ static int uvc_v4l2_do_ioctl(struct inode *inode, struct file *file,
 		cap->version = DRIVER_VERSION_NUMBER;
 		cap->capabilities = V4L2_CAP_VIDEO_CAPTURE
 				  | V4L2_CAP_STREAMING;
-	}
 		break;
+	}
 
 	/* Get, Set & Query control */
 	case VIDIOC_QUERYCTRL:
@@ -513,8 +513,8 @@ static int uvc_v4l2_do_ioctl(struct inode *inode, struct file *file,
 		uvc_ctrl_rollback(video);
 		if (ret >= 0)
 			ctrl->value = xctrl.value;
-	}
 		break;
+	}
 
 	case VIDIOC_S_CTRL:
 	{
@@ -532,8 +532,8 @@ static int uvc_v4l2_do_ioctl(struct inode *inode, struct file *file,
 			return ret;
 		}
 		ret = uvc_ctrl_commit(video);
-	}
 		break;
+	}
 
 	case VIDIOC_QUERYMENU:
 		return uvc_v4l2_query_menu(video, arg);
@@ -555,8 +555,8 @@ static int uvc_v4l2_do_ioctl(struct inode *inode, struct file *file,
 		}
 		ctrls->error_idx = 0;
 		ret = uvc_ctrl_rollback(video);
-	}
 		break;
+	}
 
 	case VIDIOC_S_EXT_CTRLS:
 	case VIDIOC_TRY_EXT_CTRLS:
@@ -584,8 +584,8 @@ static int uvc_v4l2_do_ioctl(struct inode *inode, struct file *file,
 			ret = uvc_ctrl_commit(video);
 		else
 			ret = uvc_ctrl_rollback(video);
-	}
 		break;
+	}
 
 	/* Get, Set & Enum input */
 	case VIDIOC_ENUMINPUT:
@@ -596,7 +596,8 @@ static int uvc_v4l2_do_ioctl(struct inode *inode, struct file *file,
 		u32 index = input->index;
 		int pin = 0;
 
-		if (selector == NULL) {
+		if (selector == NULL ||
+		    (video->dev->quirks & UVC_QUIRK_IGNORE_SELECTOR_UNIT)) {
 			if (index != 0)
 				return -EINVAL;
 			iterm = list_first_entry(&video->iterms,
@@ -618,14 +619,15 @@ static int uvc_v4l2_do_ioctl(struct inode *inode, struct file *file,
 		strncpy(input->name, iterm->name, sizeof input->name);
 		if (UVC_ENTITY_TYPE(iterm) == ITT_CAMERA)
 			input->type = V4L2_INPUT_TYPE_CAMERA;
-	}
 		break;
+	}
 
 	case VIDIOC_G_INPUT:
 	{
 		u8 input;
 
-		if (video->selector == NULL) {
+		if (video->selector == NULL ||
+		    (video->dev->quirks & UVC_QUIRK_IGNORE_SELECTOR_UNIT)) {
 			*(int *)arg = 0;
 			break;
 		}
@@ -637,8 +639,8 @@ static int uvc_v4l2_do_ioctl(struct inode *inode, struct file *file,
 			return ret;
 
 		*(int *)arg = input - 1;
-	}
 		break;
+	}
 
 	case VIDIOC_S_INPUT:
 	{
@@ -647,7 +649,8 @@ static int uvc_v4l2_do_ioctl(struct inode *inode, struct file *file,
 		if ((ret = uvc_acquire_privileges(handle)) < 0)
 			return ret;
 
-		if (video->selector == NULL) {
+		if (video->selector == NULL ||
+		    (video->dev->quirks & UVC_QUIRK_IGNORE_SELECTOR_UNIT)) {
 			if (input != 1)
 				return -EINVAL;
 			break;
@@ -679,9 +682,8 @@ static int uvc_v4l2_do_ioctl(struct inode *inode, struct file *file,
 			sizeof fmt->description);
 		fmt->description[sizeof fmt->description - 1] = 0;
 		fmt->pixelformat = format->fcc;
-
-	}
 		break;
+	}
 
 	case VIDIOC_TRY_FMT:
 	{
@@ -728,8 +730,8 @@ static int uvc_v4l2_do_ioctl(struct inode *inode, struct file *file,
 		fsize->type = V4L2_FRMSIZE_TYPE_DISCRETE;
 		fsize->discrete.width = frame->wWidth;
 		fsize->discrete.height = frame->wHeight;
-	}
 		break;
+	}
 
 	/* Frame interval enumeration */
 	case VIDIOC_ENUM_FRAMEINTERVALS:
@@ -741,7 +743,7 @@ static int uvc_v4l2_do_ioctl(struct inode *inode, struct file *file,
 
 		/* Look for the given pixel format and frame size */
 		for (i = 0; i < video->streaming->nformats; i++) {
-			if (video->streaming->format[i].fcc !=
+			if (video->streaming->format[i].fcc ==
 					fival->pixel_format) {
 				format = &video->streaming->format[i];
 				break;
@@ -788,8 +790,8 @@ static int uvc_v4l2_do_ioctl(struct inode *inode, struct file *file,
 			uvc_simplify_fraction(&fival->stepwise.step.numerator,
 				&fival->stepwise.step.denominator, 8, 333);
 		}
-	}
 		break;
+	}
 
 	/* Get & Set streaming parameters */
 	case VIDIOC_G_PARM:
@@ -819,8 +821,8 @@ static int uvc_v4l2_do_ioctl(struct inode *inode, struct file *file,
 
 		ccap->pixelaspect.numerator = 1;
 		ccap->pixelaspect.denominator = 1;
-	}
 		break;
+	}
 
 	case VIDIOC_G_CROP:
 	case VIDIOC_S_CROP:
@@ -844,14 +846,14 @@ static int uvc_v4l2_do_ioctl(struct inode *inode, struct file *file,
 		if (ret < 0)
 			return ret;
 
-		video->queue.drop_incomplete =
-			video->streaming->cur_format->flags &
-				UVC_FMT_FLAG_COMPRESSED ? 0 : 1;
+		if (!(video->streaming->cur_format->flags &
+		    UVC_FMT_FLAG_COMPRESSED))
+			video->queue.flags |= UVC_QUEUE_DROP_INCOMPLETE;
 
 		rb->count = ret;
 		ret = 0;
-	}
 		break;
+	}
 
 	case VIDIOC_QUERYBUF:
 	{
@@ -892,8 +894,8 @@ static int uvc_v4l2_do_ioctl(struct inode *inode, struct file *file,
 
 		if ((ret = uvc_video_enable(video, 1)) < 0)
 			return ret;
-	}
 		break;
+	}
 
 	case VIDIOC_STREAMOFF:
 	{
@@ -948,8 +950,8 @@ static int uvc_v4l2_do_ioctl(struct inode *inode, struct file *file,
 		ret = uvc_ctrl_add_info(info);
 		if (ret < 0)
 			kfree(info);
-	}
 		break;
+	}
 
 	case UVCIOC_CTRL_MAP:
 	{
@@ -975,8 +977,8 @@ static int uvc_v4l2_do_ioctl(struct inode *inode, struct file *file,
 		ret = uvc_ctrl_add_mapping(map);
 		if (ret < 0)
 			kfree(map);
-	}
 		break;
+	}
 
 	case UVCIOC_CTRL_GET:
 		return uvc_xu_ctrl_query(video, arg, 0);
