@@ -1461,9 +1461,13 @@ static int uvc_register_video(struct uvc_device *dev)
 	 * unregistered before the reference is released, so we don't need to
 	 * get another one.
 	 */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27)
 	vdev->dev = &dev->intf->dev;
 	vdev->type = 0;
 	vdev->type2 = 0;
+#else
+	vdev->parent = &dev->intf->dev;
+#endif
 	vdev->minor = -1;
 	vdev->fops = &uvc_fops;
 	vdev->release = video_device_release;
@@ -1636,13 +1640,16 @@ static void uvc_disconnect(struct usb_interface *intf)
 	 * reference to the uvc_device instance after uvc_v4l2_open() received
 	 * the pointer to the device (video_devdata) but before it got the
 	 * chance to increase the reference count (kref_get).
+	 *
+	 * Note that the reference can't be released with the lock held,
+	 * otherwise a AB-BA deadlock can occur with the videodev_lock that
+	 * videodev acquires in videodev_open() and video_unregister_device().
 	 */
 	mutex_lock(&uvc_driver.open_mutex);
-
 	dev->state |= UVC_DEV_DISCONNECTED;
-	kref_put(&dev->kref, uvc_delete);
-
 	mutex_unlock(&uvc_driver.open_mutex);
+
+	kref_put(&dev->kref, uvc_delete);
 }
 
 static int uvc_suspend(struct usb_interface *intf, pm_message_t message)
@@ -1665,7 +1672,7 @@ static int uvc_suspend(struct usb_interface *intf, pm_message_t message)
 	return uvc_video_suspend(&dev->video);
 }
 
-static int uvc_resume(struct usb_interface *intf)
+static int __uvc_resume(struct usb_interface *intf, int reset)
 {
 	struct uvc_device *dev = usb_get_intfdata(intf);
 	int ret;
@@ -1674,7 +1681,7 @@ static int uvc_resume(struct usb_interface *intf)
 		intf->cur_altsetting->desc.bInterfaceNumber);
 
 	if (intf->cur_altsetting->desc.bInterfaceSubClass == SC_VIDEOCONTROL) {
-		if ((ret = uvc_ctrl_resume_device(dev)) < 0)
+		if (reset && (ret = uvc_ctrl_resume_device(dev)) < 0)
 			return ret;
 
 		return uvc_status_resume(dev);
@@ -1688,6 +1695,18 @@ static int uvc_resume(struct usb_interface *intf)
 
 	return uvc_video_resume(&dev->video);
 }
+
+static int uvc_resume(struct usb_interface *intf)
+{
+	return __uvc_resume(intf, 0);
+}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,23)
+static int uvc_reset_resume(struct usb_interface *intf)
+{
+	return __uvc_resume(intf, 1);
+}
+#endif
 
 /* ------------------------------------------------------------------------
  * Driver initialization and cleanup
@@ -1829,6 +1848,15 @@ static struct usb_device_id uvc_ids[] = {
 	  .bInterfaceSubClass	= 1,
 	  .bInterfaceProtocol	= 0,
 	  .driver_info		= UVC_QUIRK_STREAM_NO_FID },
+	/* Asus F9SG */
+	{ .match_flags		= USB_DEVICE_ID_MATCH_DEVICE
+				| USB_DEVICE_ID_MATCH_INT_INFO,
+	  .idVendor		= 0x174f,
+	  .idProduct		= 0x8a31,
+	  .bInterfaceClass	= USB_CLASS_VIDEO,
+	  .bInterfaceSubClass	= 1,
+	  .bInterfaceProtocol	= 0,
+	  .driver_info		= UVC_QUIRK_STREAM_NO_FID },
 	/* Syntek (Asus U3S) */
 	{ .match_flags		= USB_DEVICE_ID_MATCH_DEVICE
 				| USB_DEVICE_ID_MATCH_INT_INFO,
@@ -1877,7 +1905,7 @@ static struct usb_device_id uvc_ids[] = {
 	  .bInterfaceSubClass	= 1,
 	  .bInterfaceProtocol	= 0,
 	  .driver_info		= UVC_QUIRK_PROBE_MINMAX },
-	/* Packard Bell OEM Webcam */
+	/* Packard Bell OEM Webcam - Bison Electronics */
 	{ .match_flags		= USB_DEVICE_ID_MATCH_DEVICE
 				| USB_DEVICE_ID_MATCH_INT_INFO,
 	  .idVendor		= 0x5986,
@@ -1886,7 +1914,7 @@ static struct usb_device_id uvc_ids[] = {
 	  .bInterfaceSubClass	= 1,
 	  .bInterfaceProtocol	= 0,
 	  .driver_info		= UVC_QUIRK_PROBE_MINMAX },
-	/* Acer Crystal Eye webcam */
+	/* Acer Crystal Eye webcam - Bison Electronics */
 	{ .match_flags		= USB_DEVICE_ID_MATCH_DEVICE
 				| USB_DEVICE_ID_MATCH_INT_INFO,
 	  .idVendor		= 0x5986,
@@ -1895,11 +1923,47 @@ static struct usb_device_id uvc_ids[] = {
 	  .bInterfaceSubClass	= 1,
 	  .bInterfaceProtocol	= 0,
 	  .driver_info		= UVC_QUIRK_PROBE_MINMAX },
-	/* Acer OrbiCam - Unknown vendor */
+	/* Medion Akoya Mini E1210 - Bison Electronics */
+	{ .match_flags		= USB_DEVICE_ID_MATCH_DEVICE
+				| USB_DEVICE_ID_MATCH_INT_INFO,
+	  .idVendor		= 0x5986,
+	  .idProduct		= 0x0141,
+	  .bInterfaceClass	= USB_CLASS_VIDEO,
+	  .bInterfaceSubClass	= 1,
+	  .bInterfaceProtocol	= 0,
+	  .driver_info		= UVC_QUIRK_PROBE_MINMAX },
+	/* Acer OrbiCam - Bison Electronics */
 	{ .match_flags		= USB_DEVICE_ID_MATCH_DEVICE
 				| USB_DEVICE_ID_MATCH_INT_INFO,
 	  .idVendor		= 0x5986,
 	  .idProduct		= 0x0200,
+	  .bInterfaceClass	= USB_CLASS_VIDEO,
+	  .bInterfaceSubClass	= 1,
+	  .bInterfaceProtocol	= 0,
+	  .driver_info		= UVC_QUIRK_PROBE_MINMAX },
+	/*  Fujitsu Amilo SI2636 - Bison Electronics */
+	{ .match_flags		= USB_DEVICE_ID_MATCH_DEVICE
+				| USB_DEVICE_ID_MATCH_INT_INFO,
+	  .idVendor		= 0x5986,
+	  .idProduct		= 0x0202,
+	  .bInterfaceClass	= USB_CLASS_VIDEO,
+	  .bInterfaceSubClass	= 1,
+	  .bInterfaceProtocol	= 0,
+	  .driver_info		= UVC_QUIRK_PROBE_MINMAX },
+	/* Bison Electronics */
+	{ .match_flags		= USB_DEVICE_ID_MATCH_DEVICE
+				| USB_DEVICE_ID_MATCH_INT_INFO,
+	  .idVendor		= 0x5986,
+	  .idProduct		= 0x0300,
+	  .bInterfaceClass	= USB_CLASS_VIDEO,
+	  .bInterfaceSubClass	= 1,
+	  .bInterfaceProtocol	= 0,
+	  .driver_info		= UVC_QUIRK_PROBE_MINMAX },
+	/* Clevo M570TU - Bison Electronics */
+	{ .match_flags		= USB_DEVICE_ID_MATCH_DEVICE
+				| USB_DEVICE_ID_MATCH_INT_INFO,
+	  .idVendor		= 0x5986,
+	  .idProduct		= 0x0303,
 	  .bInterfaceClass	= USB_CLASS_VIDEO,
 	  .bInterfaceSubClass	= 1,
 	  .bInterfaceProtocol	= 0,
@@ -1921,6 +1985,9 @@ struct uvc_driver uvc_driver = {
 		.disconnect	= uvc_disconnect,
 		.suspend	= uvc_suspend,
 		.resume		= uvc_resume,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,23)
+		.reset_resume	= uvc_reset_resume,
+#endif
 		.id_table	= uvc_ids,
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,19)
 		.supports_autosuspend = 1,

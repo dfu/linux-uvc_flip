@@ -25,6 +25,9 @@
 #if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,15)
 #include <media/v4l2-common.h>
 #endif
+#if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,26)
+#include <media/v4l2-ioctl.h>
+#endif
 
 #include "uvcvideo.h"
 
@@ -1035,7 +1038,7 @@ static int uvc_v4l2_mmap(struct file *file, struct vm_area_struct *vma)
 {
 	struct video_device *vdev = video_devdata(file);
 	struct uvc_video_device *video = video_get_drvdata(vdev);
-	struct uvc_buffer *buffer;
+	struct uvc_buffer *uninitialized_var(buffer);
 	struct page *page;
 	unsigned long addr, start, size;
 	unsigned int i;

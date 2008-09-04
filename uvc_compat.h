@@ -9,6 +9,11 @@
 #endif
 #endif
 
+#ifdef CONFIG_INPUT
+#undef CONFIG_USB_VIDEO_CLASS_INPUT_EVDEV
+#define CONFIG_USB_VIDEO_CLASS_INPUT_EVDEV 1
+#endif
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,18)
 /*
  * Extended control API
@@ -177,11 +182,15 @@ enum  v4l2_exposure_auto_type {
 
 #ifdef __KERNEL__
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,12)
+#define __nocast
+#endif
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,14)
 /*
  * kzalloc()
  */
-typedef unsigned int __nocast gfp_flags;
+typedef unsigned int __nocast gfp_t;
 
 static inline void *
 kzalloc(size_t size, gfp_t gfp_flags)
@@ -197,6 +206,8 @@ kzalloc(size_t size, gfp_t gfp_flags)
 /*
  * vm_insert_page()
  */
+#include <linux/mm.h>
+
 static inline int
 vm_insert_page(struct vm_area_struct *vma, unsigned long addr,
 		struct page *page)
@@ -248,12 +259,24 @@ v4l_printk_ioctl(unsigned int cmd)
 #include <asm/mutex.h>
 #endif
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,18)
+#include <linux/videodev.h>
+#endif
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,19)
 /*
  * usb_endpoint_* functions
  *
  * Included in Linux 2.6.19
+ * Backported to 2.6.18 in Red Hat Enterprise Linux 5.2
  */
+#ifdef RHEL_RELEASE_CODE
+#if RHEL_RELEASE_CODE < RHEL_RELEASE_VERSION(5,2)
+#define RHEL_HAS_USB_ENDPOINT
+#endif
+#endif
+
+#ifndef RHEL_HAS_USB_ENDPOINT
 static inline int usb_endpoint_dir_in(const struct usb_endpoint_descriptor *epd)
 {
 	return ((epd->bEndpointAddress & USB_ENDPOINT_DIR_MASK) == USB_DIR_IN);
@@ -281,6 +304,7 @@ static inline int usb_endpoint_is_int_in(const struct usb_endpoint_descriptor *e
 {
 	return (usb_endpoint_xfer_int(epd) && usb_endpoint_dir_in(epd));
 }
+#endif /* RHEL_HAS_USB_ENDPOINT */
 
 /*
  * USB auto suspend
@@ -301,6 +325,11 @@ static inline void usb_autopm_put_interface(struct usb_interface *intf)
  */
 #define list_first_entry(ptr, type, member) \
 	list_entry((ptr)->next, type, member)
+
+/*
+ * uninitialized_var() macro
+ */
+#define uninitialized_var(x) x
 #endif
 
 #endif /* __KERNEL__ */

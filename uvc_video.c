@@ -92,17 +92,20 @@ static void uvc_fixup_buffer_size(struct uvc_video_device *video,
 static int uvc_get_video_ctrl(struct uvc_video_device *video,
 	struct uvc_streaming_control *ctrl, int probe, __u8 query)
 {
-	__u8 data[34];
-	__u8 size;
+	__u8 *data;
+	__u16 size;
 	int ret;
 
 	size = video->dev->uvc_version >= 0x0110 ? 34 : 26;
-	ret = __uvc_query_ctrl(video->dev, query, 0, video->streaming->intfnum,
-		probe ? VS_PROBE_CONTROL : VS_COMMIT_CONTROL, &data, size,
-		UVC_CTRL_STREAMING_TIMEOUT);
+	data = kmalloc(size, GFP_KERNEL);
+	if (data == NULL)
+		return -ENOMEM;
 
+	ret = __uvc_query_ctrl(video->dev, query, 0, video->streaming->intfnum,
+		probe ? VS_PROBE_CONTROL : VS_COMMIT_CONTROL, data, size,
+		UVC_CTRL_STREAMING_TIMEOUT);
 	if (ret < 0)
-		return ret;
+		goto out;
 
 	ctrl->bmHint = le16_to_cpup((__le16 *)&data[0]);
 	ctrl->bFormatIndex = data[2];
@@ -138,17 +141,22 @@ static int uvc_get_video_ctrl(struct uvc_video_device *video,
 	 */
 	uvc_fixup_buffer_size(video, ctrl);
 
-	return 0;
+out:
+	kfree(data);
+	return ret;
 }
 
 int uvc_set_video_ctrl(struct uvc_video_device *video,
 	struct uvc_streaming_control *ctrl, int probe)
 {
-	__u8 data[34];
-	__u8 size;
+	__u8 *data;
+	__u16 size;
+	int ret;
 
 	size = video->dev->uvc_version >= 0x0110 ? 34 : 26;
-	memset(data, 0, sizeof data);
+	data = kzalloc(size, GFP_KERNEL);
+	if (data == NULL)
+		return -ENOMEM;
 
 	*(__le16 *)&data[0] = cpu_to_le16(ctrl->bmHint);
 	data[2] = ctrl->bFormatIndex;
@@ -176,10 +184,13 @@ int uvc_set_video_ctrl(struct uvc_video_device *video,
 		data[33] = ctrl->bMaxVersion;
 	}
 
-	return __uvc_query_ctrl(video->dev, SET_CUR, 0,
+	ret = __uvc_query_ctrl(video->dev, SET_CUR, 0,
 		video->streaming->intfnum,
-		probe ? VS_PROBE_CONTROL : VS_COMMIT_CONTROL, &data, size,
+		probe ? VS_PROBE_CONTROL : VS_COMMIT_CONTROL, data, size,
 		UVC_CTRL_STREAMING_TIMEOUT);
+
+	kfree(data);
+	return ret;
 }
 
 int uvc_probe_video(struct uvc_video_device *video,
@@ -446,7 +457,8 @@ static void uvc_video_decode_isoc(struct urb *urb,
 			urb->iso_frame_desc[i].actual_length - ret);
 
 		/* Process the header again. */
-		uvc_video_decode_end(video, buf, mem, ret);
+		uvc_video_decode_end(video, buf, mem,
+			urb->iso_frame_desc[i].actual_length);
 
 		if (buf->state == UVC_BUF_STATE_DONE ||
 		    buf->state == UVC_BUF_STATE_ERROR)
@@ -503,7 +515,7 @@ static void uvc_video_decode_bulk(struct urb *urb,
 	    video->bulk.payload_size >= video->bulk.max_payload_size) {
 		if (!video->bulk.skip_payload && buf != NULL) {
 			uvc_video_decode_end(video, buf, video->bulk.header,
-				video->bulk.header_size);
+				video->bulk.payload_size);
 			if (buf->state == UVC_BUF_STATE_DONE ||
 			    buf->state == UVC_BUF_STATE_ERROR)
 				buf = uvc_queue_next_buffer(&video->queue, buf);
