@@ -271,7 +271,7 @@ v4l_printk_ioctl(unsigned int cmd)
  * Backported to 2.6.18 in Red Hat Enterprise Linux 5.2
  */
 #ifdef RHEL_RELEASE_CODE
-#if RHEL_RELEASE_CODE < RHEL_RELEASE_VERSION(5,2)
+#if RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(5,2)
 #define RHEL_HAS_USB_ENDPOINT
 #endif
 #endif
@@ -317,6 +317,12 @@ static inline int usb_autopm_get_interface(struct usb_interface *intf)
 static inline void usb_autopm_put_interface(struct usb_interface *intf)
 { }
 
+/*
+ * DIV_ROUND_UP() macro
+ *
+ * Included in Linux 2.6.19
+ */
+#define DIV_ROUND_UP(n,d) (((n) + (d) - 1) / (d))
 #endif
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,22)
@@ -330,6 +336,18 @@ static inline void usb_autopm_put_interface(struct usb_interface *intf)
  * uninitialized_var() macro
  */
 #define uninitialized_var(x) x
+#endif
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,28)
+#if defined(OBSOLETE_OWNER) || defined(OBSOLETE_DEVDATA)
+/*
+ * video_drvdata()
+ */
+static inline void *video_drvdata(struct file *file)
+{
+	return video_get_drvdata(video_devdata(file));
+}
+#endif
 #endif
 
 #endif /* __KERNEL__ */

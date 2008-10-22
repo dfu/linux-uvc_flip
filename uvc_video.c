@@ -662,7 +662,7 @@ static int uvc_init_video_isoc(struct uvc_video_device *video,
 	if (size > UVC_MAX_FRAME_SIZE)
 		return -EINVAL;
 
-	npackets = (size + psize - 1) / psize;
+	npackets = DIV_ROUND_UP(size, psize);
 	if (npackets > UVC_MAX_ISO_PACKETS)
 		npackets = UVC_MAX_ISO_PACKETS;
 
@@ -976,6 +976,11 @@ int uvc_video_enable(struct uvc_video_device *video, int enable)
 		uvc_queue_enable(&video->queue, 0);
 		return 0;
 	}
+
+	if (video->streaming->cur_format->flags & UVC_FMT_FLAG_COMPRESSED)
+		video->queue.flags &= ~UVC_QUEUE_DROP_INCOMPLETE;
+	else
+		video->queue.flags |= UVC_QUEUE_DROP_INCOMPLETE;
 
 	if ((ret = uvc_queue_enable(&video->queue, 1)) < 0)
 		return ret;

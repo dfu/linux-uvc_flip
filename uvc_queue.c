@@ -13,6 +13,7 @@
 
 #include <linux/kernel.h>
 #include <linux/version.h>
+#include <linux/mm.h>
 #include <linux/list.h>
 #include <linux/module.h>
 #include <linux/usb.h>
@@ -341,7 +342,7 @@ int uvc_dequeue_buffer(struct uvc_video_queue *queue,
 		goto done;
 	}
 
-	// Flip webcam image.
+	/* Flip webcam image. */
 	for (i = 0; i < (frame->wHeight >> 1); i++) {
 		memcpy(&swap, (char *) queue->mem + buf->buf.m.offset +
 			i * (frame->wWidth << 1), (frame->wWidth << 1));
